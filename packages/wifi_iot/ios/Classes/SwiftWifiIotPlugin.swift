@@ -118,48 +118,48 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func connect(call: FlutterMethodCall, result: @escaping FlutterResult) {
-        let sSSID = (call.arguments as? [String : AnyObject])?["ssid"] as! String
-        let _ = (call.arguments as? [String : AnyObject])?["bssid"] as? String? // not used
-        let sPassword = (call.arguments as? [String : AnyObject])?["password"] as? String? ?? nil
-        let bJoinOnce = (call.arguments as? [String : AnyObject])?["join_once"] as! Bool?
-        let sSecurity = (call.arguments as? [String : AnyObject])?["security"] as! String?
+       private func connect(call: FlutterMethodCall, result: @escaping FlutterResult) {
+           let sSSID = (call.arguments as? [String : AnyObject])?["ssid"] as! String
+           let _ = (call.arguments as? [String : AnyObject])?["bssid"] as? String? // not used
+           let sPassword = (call.arguments as? [String : AnyObject])?["password"] as? String? ?? nil
+           let bJoinOnce = (call.arguments as? [String : AnyObject])?["join_once"] as! Bool?
+           let sSecurity = (call.arguments as? [String : AnyObject])?["security"] as! String?
 
-        if #available(iOS 11.0, *) {
-            let configuration = initHotspotConfiguration(ssid: sSSID, passphrase: sPassword, security: sSecurity)
-            configuration.joinOnce = bJoinOnce ?? false
+           if #available(iOS 11.0, *) {
+               let configuration = initHotspotConfiguration(ssid: sSSID, passphrase: sPassword, security: sSecurity)
+               configuration.joinOnce = bJoinOnce ?? false
 
-            NEHotspotConfigurationManager.shared.apply(configuration) { [weak self] (error) in
-                guard let this = self else {
-                    print("WiFi network not found")
-                    result(false)
-                    return
-                }
-                this.getSSID { (connectedSSID) -> () in
-                    if (error != nil) {
-                        if (error?.localizedDescription == "already associated.") {
-                            print("Connected to '\(connectedSSID ?? "<Unknown Network>")'")
-                            result(true)
-                        } else {
-                            print("Not Connected")
-                            result(false)
-                        }
-                    } else if let connectedSSID = connectedSSID {
-                        print("Connected to " + connectedSSID)
-                        // Emit result of [isConnected] by checking if targetSSID is the same as connectedSSID.
-                        result(sSSID == connectedSSID)
-                    } else {
-                        print("WiFi network not found")
-                        result(false)
-                    }
-                }
-            }
-        } else {
-            print("Not Connected")
-            result(nil)
-            return
-        }
-    }
+               NEHotspotConfigurationManager.shared.apply(configuration) { (error) in
+                   if let error = error as NSError? {
+                       switch error.code {
+                       case NEHotspotConfigurationError.alreadyAssociated.rawValue:
+                           print("Already connected to '\(sSSID)'")
+                           result(true)
+                       case NEHotspotConfigurationError.userDenied.rawValue:
+                           print("User denied connection")
+                           result(false)
+                       default:
+                           // Handle other non-NEHotspotConfigurationError errors
+                           if error.localizedDescription == "already associated." {
+                               print("Already connected to '\(sSSID)'")
+                               result(true)
+                           } else {
+                               print("Connection failed: \(error.localizedDescription)")
+                               result(false)
+                           }
+                       }
+                   } else {
+                       // No error means successful connection
+                       print("Successfully connected to '\(sSSID)'")
+                       result(true)
+                   }
+               }
+           } else {
+               print("Not Connected")
+               result(nil)
+               return
+           }
+       }
 
     private func findAndConnect(call: FlutterMethodCall, result: @escaping FlutterResult) {
         result(FlutterMethodNotImplemented)
