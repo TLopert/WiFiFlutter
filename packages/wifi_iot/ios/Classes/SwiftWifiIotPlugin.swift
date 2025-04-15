@@ -128,6 +128,12 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
            if #available(iOS 11.0, *) {
                let configuration = initHotspotConfiguration(ssid: sSSID, passphrase: sPassword, security: sSecurity)
                configuration.joinOnce = bJoinOnce ?? false
+               
+                // Add this before applying the configuration
+                if #available(iOS 14.0, *) {
+                    // This helps ensure the system knows we want to maintain cellular connectivity
+                    triggerLocalNetworkPrivacyAlert()
+                }
 
                NEHotspotConfigurationManager.shared.apply(configuration) { (error) in
                    if let error = error as NSError? {
