@@ -199,16 +199,44 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func isConnected(result: @escaping FlutterResult) {
-        // For now..
-        getSSID { (sSSID) in
-            if (sSSID != nil) {
-                result(true)
-            } else {
-                result(false)
-            }
-        }
-    }
+   private func isConnected(result: @escaping FlutterResult) {
+       if #available(iOS 12.0, *) {
+           let monitor = NWPathMonitor(requiringInterfaceType: .wifi)
+
+           monitor.pathUpdateHandler = { path in
+               monitor.cancel() // Stop monitoring after we get the status
+
+               if path.status == .satisfied {
+                   // We have WiFi connectivity
+                   print("WiFi is connected")
+                   result(true)
+               } else {
+                   // No WiFi connectivity
+                   print("WiFi is not connected")
+                   result(false)
+               }
+           }
+
+           // Start monitoring on a background queue
+           let queue = DispatchQueue(label: "com.wifi_iot.networkMonitor")
+           monitor.start(queue: queue)
+       } else {
+           // Fallback for older iOS versions
+           if let interfaces = CNCopySupportedInterfaces() as NSArray? {
+               for interface in interfaces {
+                   if let interfaceInfo = CNCopyCurrentNetworkInfo(interface as! CFString) as NSDictionary? {
+                       // If we can get interface info, we're connected
+                       print("WiFi is connected")
+                       result(true)
+                       return
+                   }
+
+               }
+           }
+           print("WiFi is not connected")
+           result(false)
+       }
+   }
 
     private func disconnect(result: @escaping FlutterResult) {
         if #available(iOS 11.0, *) {
