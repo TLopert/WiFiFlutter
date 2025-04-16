@@ -1,13 +1,22 @@
 import Flutter
+import CoreLocation
 import UIKit
 import SystemConfiguration.CaptiveNetwork
 import NetworkExtension
 
-public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
+public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDelegate {
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "wifi_iot", binaryMessenger: registrar.messenger())
         let instance = SwiftWifiIotPlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+
+    private let locationManager = CLLocationManager()
+    private var ssidResult: ((String?) -> Void)?
+
+    public override init() {
+           super.init()
+           locationManager.delegate = self
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -118,48 +127,48 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func connect(call: FlutterMethodCall, result: @escaping FlutterResult) {
-        let sSSID = (call.arguments as? [String : AnyObject])?["ssid"] as! String
-        let _ = (call.arguments as? [String : AnyObject])?["bssid"] as? String? // not used
-        let sPassword = (call.arguments as? [String : AnyObject])?["password"] as? String? ?? nil
-        let bJoinOnce = (call.arguments as? [String : AnyObject])?["join_once"] as! Bool?
-        let sSecurity = (call.arguments as? [String : AnyObject])?["security"] as! String?
+       private func connect(call: FlutterMethodCall, result: @escaping FlutterResult) {
+           let sSSID = (call.arguments as? [String : AnyObject])?["ssid"] as! String
+           let _ = (call.arguments as? [String : AnyObject])?["bssid"] as? String? // not used
+           let sPassword = (call.arguments as? [String : AnyObject])?["password"] as? String? ?? nil
+           let bJoinOnce = (call.arguments as? [String : AnyObject])?["join_once"] as! Bool?
+           let sSecurity = (call.arguments as? [String : AnyObject])?["security"] as! String?
 
-        if #available(iOS 11.0, *) {
-            let configuration = initHotspotConfiguration(ssid: sSSID, passphrase: sPassword, security: sSecurity)
-            configuration.joinOnce = bJoinOnce ?? false
+           if #available(iOS 11.0, *) {
+               let configuration = initHotspotConfiguration(ssid: sSSID, passphrase: sPassword, security: sSecurity)
+               configuration.joinOnce = bJoinOnce ?? false
 
-            NEHotspotConfigurationManager.shared.apply(configuration) { [weak self] (error) in
-                guard let this = self else {
-                    print("WiFi network not found")
-                    result(false)
-                    return
-                }
-                this.getSSID { (connectedSSID) -> () in
-                    if (error != nil) {
-                        if (error?.localizedDescription == "already associated.") {
-                            print("Connected to '\(connectedSSID ?? "<Unknown Network>")'")
-                            result(true)
-                        } else {
-                            print("Not Connected")
-                            result(false)
-                        }
-                    } else if let connectedSSID = connectedSSID {
-                        print("Connected to " + connectedSSID)
-                        // Emit result of [isConnected] by checking if targetSSID is the same as connectedSSID.
-                        result(sSSID == connectedSSID)
-                    } else {
-                        print("WiFi network not found")
-                        result(false)
-                    }
-                }
-            }
-        } else {
-            print("Not Connected")
-            result(nil)
-            return
-        }
-    }
+               NEHotspotConfigurationManager.shared.apply(configuration) { (error) in
+                   if let error = error as NSError? {
+                       switch error.code {
+                       case NEHotspotConfigurationError.alreadyAssociated.rawValue:
+                           print("Already connected to '\(sSSID)'")
+                           result(true)
+                       case NEHotspotConfigurationError.userDenied.rawValue:
+                           print("User denied connection")
+                           result(false)
+                       default:
+                           // Handle other non-NEHotspotConfigurationError errors
+                           if error.localizedDescription == "already associated." {
+                               print("Already connected to '\(sSSID)'")
+                               result(true)
+                           } else {
+                               print("Connection failed: \(error.localizedDescription)")
+                               result(false)
+                           }
+                       }
+                   } else {
+                       // No error means successful connection
+                       print("Successfully connected to '\(sSSID)'")
+                       result(true)
+                   }
+               }
+           } else {
+               print("Not Connected")
+               result(nil)
+               return
+           }
+       }
 
     private func findAndConnect(call: FlutterMethodCall, result: @escaping FlutterResult) {
         result(FlutterMethodNotImplemented)
@@ -229,10 +238,96 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin {
     }
 
     private func getSSID(result: @escaping (String?) -> ()) {
+        self.ssidResult = result
+
         if #available(iOS 14.0, *) {
-            NEHotspotNetwork.fetchCurrent(completionHandler: { currentNetwork in
-                result(currentNetwork?.ssid);
-            })
+            switch locationManager.authorizationStatus {
+            case .notDetermined:
+                // First request basic location permission
+                locationManager.requestWhenInUseAuthorization()
+            case .authorizedWhenInUse, .authorizedAlways:
+                // We already have basic permission, request temporary precise location
+                locationManager.requestTemporaryFullAccuracyAuthorization(
+                    withPurposeKey: "WiFiSSID"
+                ) { error in
+                    if let error = error {
+                        print("Error requesting precise location: \(error)")
+                    }
+                    self.fetchSSID(result: result)
+                }
+            default:
+                print("Location permission denied")
+                result(nil)
+            }
+        } else if #available(iOS 13.0, *) {
+            switch CLLocationManager.authorizationStatus() {
+            case .authorizedWhenInUse, .authorizedAlways:
+                fetchSSID(result: result)
+            case .notDetermined:
+                locationManager.requestWhenInUseAuthorization()
+            default:
+                print("Location permission denied")
+                result(nil)
+            }
+        } else {
+            fetchSSID(result: result)
+        }
+    }
+
+    // CLLocationManagerDelegate methods
+    public func locationManager(_ manager: CLLocationManager,
+                              didChangeAuthorization status: CLAuthorizationStatus) {
+        if #available(iOS 14.0, *) {
+            switch status {
+            case .authorizedWhenInUse, .authorizedAlways:
+                // Now that we have basic permission, request temporary precise location
+                locationManager.requestTemporaryFullAccuracyAuthorization(
+                    withPurposeKey: "WiFiSSID"
+                ) { error in
+                    if let error = error {
+                        print("Error requesting precise location: \(error)")
+                    }
+                    self.fetchSSID(result: self.ssidResult ?? { _ in })
+                }
+            default:
+                ssidResult?(nil)
+                ssidResult = nil
+            }
+        } else {
+            // For iOS 13 and below
+            if status == .authorizedWhenInUse || status == .authorizedAlways {
+                self.fetchSSID(result: self.ssidResult ?? { _ in })
+            } else {
+                ssidResult?(nil)
+                ssidResult = nil
+            }
+        }
+    }
+
+    @available(iOS 14.0, *)
+    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            // Now that we have basic permission, request temporary precise location
+            locationManager.requestTemporaryFullAccuracyAuthorization(
+                withPurposeKey: "WiFiSSID"
+            ) { error in
+                if let error = error {
+                    print("Error requesting precise location: \(error)")
+                }
+                self.fetchSSID(result: self.ssidResult ?? { _ in })
+            }
+        default:
+            ssidResult?(nil)
+            ssidResult = nil
+        }
+    }
+
+    private func fetchSSID(result: @escaping (String?) -> ()) {
+        if #available(iOS 14.0, *) {
+            NEHotspotNetwork.fetchCurrent { network in
+                result(network?.ssid)
+            }
         } else {
             if let interfaces = CNCopySupportedInterfaces() as NSArray? {
                 for interface in interfaces {
