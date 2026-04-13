@@ -140,22 +140,21 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
 
                NEHotspotConfigurationManager.shared.apply(configuration) { (error) in
                    if let error = error as NSError? {
-                       switch error.code {
-                       case NEHotspotConfigurationError.alreadyAssociated.rawValue:
+                       // Check by error domain + code to avoid locale-dependent string comparisons
+                       let isAlreadyAssociated =
+                           error.domain == NEHotspotConfigurationErrorDomain &&
+                           error.code == NEHotspotConfigurationError.alreadyAssociated.rawValue
+
+                       if isAlreadyAssociated {
                            print("Already connected to '\(sSSID)'")
                            result(true)
-                       case NEHotspotConfigurationError.userDenied.rawValue:
+                       } else if error.domain == NEHotspotConfigurationErrorDomain &&
+                                 error.code == NEHotspotConfigurationError.userDenied.rawValue {
                            print("User denied connection")
                            result(false)
-                       default:
-                           // Handle other non-NEHotspotConfigurationError errors
-                           if error.localizedDescription == "already associated." {
-                               print("Already connected to '\(sSSID)'")
-                               result(true)
-                           } else {
-                               print("Connection failed: \(error.localizedDescription)")
-                               result(false)
-                           }
+                       } else {
+                           print("Connection failed: domain=\(error.domain) code=\(error.code) \(error.localizedDescription)")
+                           result(false)
                        }
                    } else {
                        // No error means successful connection
@@ -246,14 +245,17 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
                 // First request basic location permission
                 locationManager.requestWhenInUseAuthorization()
             case .authorizedWhenInUse, .authorizedAlways:
-                // We already have basic permission, request temporary precise location
-                locationManager.requestTemporaryFullAccuracyAuthorization(
-                    withPurposeKey: "WiFiSSID"
-                ) { error in
-                    if let error = error {
-                        print("Error requesting precise location: \(error)")
-                    }
+                if locationManager.accuracyAuthorization == .fullAccuracy {
+                    // Already have full accuracy, fetch directly
                     self.fetchSSID(result: result)
+                } else {
+                    // Request temporary full accuracy for SSID retrieval
+                    locationManager.requestTemporaryFullAccuracyAuthorization(
+                        withPurposeKey: "WiFiSSID"
+                    ) { error in
+                        // Code 18 = user already decided, not a real error
+                        self.fetchSSID(result: result)
+                    }
                 }
             default:
                 print("Location permission denied")
@@ -274,33 +276,22 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
         }
     }
 
-    // CLLocationManagerDelegate methods
+    // CLLocationManagerDelegate — single entry point for all iOS versions.
+    // On iOS 14+ the runtime calls locationManagerDidChangeAuthorization(_:)
+    // instead of the legacy didChangeAuthorization(status:). Implementing both
+    // causes double invocation on iOS 14+, so we only keep the modern one and
+    // fall back via the legacy signature for iOS 13.
     public func locationManager(_ manager: CLLocationManager,
                               didChangeAuthorization status: CLAuthorizationStatus) {
-        if #available(iOS 14.0, *) {
-            switch status {
-            case .authorizedWhenInUse, .authorizedAlways:
-                // Now that we have basic permission, request temporary precise location
-                locationManager.requestTemporaryFullAccuracyAuthorization(
-                    withPurposeKey: "WiFiSSID"
-                ) { error in
-                    if let error = error {
-                        print("Error requesting precise location: \(error)")
-                    }
-                    self.fetchSSID(result: self.ssidResult ?? { _ in })
-                }
-            default:
-                ssidResult?(nil)
-                ssidResult = nil
-            }
+        // iOS 14+ uses locationManagerDidChangeAuthorization instead
+        if #available(iOS 14.0, *) { return }
+
+        // iOS 13
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
+            self.fetchSSID(result: self.ssidResult ?? { _ in })
         } else {
-            // For iOS 13 and below
-            if status == .authorizedWhenInUse || status == .authorizedAlways {
-                self.fetchSSID(result: self.ssidResult ?? { _ in })
-            } else {
-                ssidResult?(nil)
-                ssidResult = nil
-            }
+            ssidResult?(nil)
+            ssidResult = nil
         }
     }
 
@@ -308,14 +299,14 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
     public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         switch manager.authorizationStatus {
         case .authorizedWhenInUse, .authorizedAlways:
-            // Now that we have basic permission, request temporary precise location
-            locationManager.requestTemporaryFullAccuracyAuthorization(
-                withPurposeKey: "WiFiSSID"
-            ) { error in
-                if let error = error {
-                    print("Error requesting precise location: \(error)")
-                }
+            if manager.accuracyAuthorization == .fullAccuracy {
                 self.fetchSSID(result: self.ssidResult ?? { _ in })
+            } else {
+                locationManager.requestTemporaryFullAccuracyAuthorization(
+                    withPurposeKey: "WiFiSSID"
+                ) { _ in
+                    self.fetchSSID(result: self.ssidResult ?? { _ in })
+                }
             }
         default:
             ssidResult?(nil)
@@ -368,51 +359,48 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
     }
 
     private func getIP(result: FlutterResult) {
-        guard let interface = getNetworkInterface(family: AF_INET) else {
-            return result(nil)
-        }
-
-        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
-                    &hostname, socklen_t(hostname.count),
-                    nil, socklen_t(0), NI_NUMERICHOST)
-
-        result(String(cString: hostname))
+        getIP(result: result, family: AF_INET)
     }
 
-    private func getNetworkInterface(family: Int32) -> ifaddrs? {
-        var ifaddr : UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
-        guard let firstAddr = ifaddr else { return nil }
+    private func getIP(result: FlutterResult, family: Int32) {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else {
+            result(nil)
+            return
+        }
+        guard let firstAddr = ifaddr else {
+            result(nil)
+            return
+        }
+        defer { freeifaddrs(ifaddr) }
 
         for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             if ifptr.pointee.ifa_addr.pointee.sa_family == UInt8(family) {
                 if String(cString: ifptr.pointee.ifa_name) == "en0" {
-                    freeifaddrs(ifaddr)
-                    return ifptr.pointee
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    getnameinfo(ifptr.pointee.ifa_addr,
+                                socklen_t(ifptr.pointee.ifa_addr.pointee.sa_len),
+                                &hostname, socklen_t(hostname.count),
+                                nil, socklen_t(0), NI_NUMERICHOST)
+                    result(String(cString: hostname))
+                    return
                 }
             }
         }
-        freeifaddrs(ifaddr)
-        return nil
+        result(nil)
     }
 
     private func removeWifiNetwork(call: FlutterMethodCall, result: @escaping FlutterResult) {
         let arguments = call.arguments
-        let sPrefixSSID = (arguments as! [String : String])["prefix_ssid"] ?? ""
-        if (sPrefixSSID == "") {
-            print("No prefix SSID was given!")
+        let sSSID = (arguments as! [String : String])["ssid"] ?? (arguments as! [String : String])["prefix_ssid"] ?? ""
+        if (sSSID == "") {
+            print("No SSID was given!")
             result(nil)
+            return
         }
 
         if #available(iOS 11.0, *) {
-            NEHotspotConfigurationManager.shared.getConfiguredSSIDs { (htSSID) in
-                for sIncSSID in htSSID {
-                    if (sPrefixSSID != "" && sIncSSID.hasPrefix(sPrefixSSID)) {
-                        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: sIncSSID)
-                    }
-                }
-            }
+            NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: sSSID)
             result(true)
         } else {
             print("Not removed")
