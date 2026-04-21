@@ -258,6 +258,25 @@ class WiFiForIoTPlugin {
     return result ?? false;
   }
 
+  /// Proactively triggers the iOS local network permission prompt.
+  ///
+  /// On iOS 14+ the OS shows a "Allow local network access?" dialog the first
+  /// time an app tries to reach any local address. Call this early in your
+  /// app flow (e.g. when entering a WiFi instrument screen) so the prompt is
+  /// dismissed before the user tries to actually connect.
+  ///
+  /// No-op on Android and iOS <14.
+  static Future<bool> requestLocalNetworkPermission() async {
+    if (!Platform.isIOS) return true;
+    bool? result;
+    try {
+      result = await _channel.invokeMethod('requestLocalNetworkPermission');
+    } on MissingPluginException catch (e) {
+      print("MissingPluginException : ${e.toString()}");
+    }
+    return result ?? false;
+  }
+
   /// Returns whether the WiFi is enabled
   static Future<bool> isEnabled() async {
     final Map<String, String> htArguments = Map();

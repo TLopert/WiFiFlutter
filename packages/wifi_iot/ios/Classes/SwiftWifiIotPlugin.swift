@@ -28,6 +28,12 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
             case "forceWifiUsage":
                 forceWifiUsage(call: call, result: result)
                 break;
+            case "requestLocalNetworkPermission":
+                if #available(iOS 14.0, *) {
+                    triggerLocalNetworkPrivacyAlert()
+                }
+                result(true)
+                break;
             case "isEnabled":
                 isEnabled(result: result)
                 break;
