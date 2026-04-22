@@ -3,6 +3,7 @@ import CoreLocation
 import UIKit
 import SystemConfiguration.CaptiveNetwork
 import NetworkExtension
+import Network
 
 public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDelegate {
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -31,6 +32,7 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
             case "requestLocalNetworkPermission":
                 if #available(iOS 14.0, *) {
                     triggerLocalNetworkPrivacyAlert()
+                    triggerLocalNetworkPrivacyAlertViaBrowser()
                 }
                 result(true)
                 break;
@@ -483,6 +485,29 @@ public class SwiftWifiIotPlugin: NSObject, FlutterPlugin, CLLocationManagerDeleg
             result(FlutterMethodNotImplemented)
         } else {
             result(nil)
+        }
+    }
+}
+
+/// Fallback trigger for local network privacy alert that works on any interface,
+/// including cellular-only devices. Starts a short-lived Bonjour browser which
+/// iOS treats as a local-network operation, causing the prompt to appear.
+@available(iOS 14.0, *)
+private var _localNetBrowser: NWBrowser?
+@available(iOS 14.0, *)
+func triggerLocalNetworkPrivacyAlertViaBrowser() {
+    // Cancel any previous browser
+    _localNetBrowser?.cancel()
+    let params = NWParameters()
+    params.includePeerToPeer = true
+    let browser = NWBrowser(for: .bonjour(type: "_http._tcp.", domain: nil), using: params)
+    _localNetBrowser = browser
+    browser.start(queue: .main)
+    // Keep it alive briefly so iOS registers the local-network attempt, then cancel.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        browser.cancel()
+        if _localNetBrowser === browser {
+            _localNetBrowser = nil
         }
     }
 }
